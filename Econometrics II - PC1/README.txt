@@ -1,0 +1,1 @@
+Part of the first PC of Econometrics II was modeling with time series. In this case, we selected the S&P 500

@@ -1,0 +1,132 @@
+---
+title: "Trabajo Final Bautista - R Finanzas Avanzado"
+author: "Ricardo Bautista"
+output:
+  rmarkdown::github_document:
+    df_print: paged
+  pdf_document: default
+---
+# Modelando series de tiempo - S&P 500
+En esta ocasión se modelará el índice Standard & Poor's 500 conocido por ser uno de los índices más importantes de los Estados Unidos. Para realizar esto se trabajará con las herramaienteas  de series de tiempo que nos ofrece R.
+Modelar este tipo de índices o el análisis univariado, en general, es de utilidad al momento de querer realizar predicciones a futuro o analizar como se ha comportado la serie debido a ciertos eventos o la propia caracterización de la variable. 
+Normalmente, este análisis es muy utilizado en el área de finanzas porque el inversionista está interesado en estimar la tasa de retorno y su volatilidad en un periodo de tenencia. Así, los modelos GARCH suponen una estimación simultánea de la media y la varianza condicionales. Por otra parte, existen los modelos que incorporan los "efectos asimétricos" como el EGARCH que denotan que noticias negativas pueden afectar en mayor magnitud a la volatilidad de la variable.
+
+## Importación de datos y Gráficos
+Primero, cargamos librerías y limpiamos variables
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+library(data.table)
+library(ggplot2)
+library(stringr)
+library(quantmod)
+library(PerformanceAnalytics)
+library(urca)
+library(forecast)
+library(rugarch)
+```
+
+Importamos los datos por medio de *cuantmod* y los guardamos en dt_accion_SPY. Se trabajará en el periodo del 2012-01-01 hasta el 2016-12-31
+```{r message=FALSE}
+dt_accion_SPY <- data.table(Ad(getSymbols(Symbols = "SPY",
+                                      from = "2012-01-01",
+                                      to = "2016-12-31",
+                                      src = "yahoo",
+                                      auto.assign = FALSE)),keep.rownames = T)
+
+colnames(dt_accion_SPY) <- c("Fecha","ClosedPrice")
+```
+
+```{r echo=FALSE}
+head(dt_accion_SPY)
+```
+Creamos los retornos de la acción
+```{r message=FALSE, warning=FALSE}
+dt_retorno_SPY <- data.table(Return.calculate(dt_accion_SPY),keep.rownames = T)
+dt_retorno_SPY <- na.omit(dt_retorno_SPY)
+colnames(dt_retorno_SPY) <- c("Fecha","ClosedPrice")
+```
+
+Creamos los gráficos de líneas para un análisis visual
+```{r echo=FALSE}
+
+#Plot accion
+ggplot(data = dt_accion_SPY)+
+  geom_line(mapping = aes(x = Fecha, y = ClosedPrice), color = "blue4")+
+  geom_hline(yintercept = mean(dt_accion_SPY$ClosedPrice), color = "darkred")
+
+#Plot Retornos
+ggplot(data = dt_retorno_SPY)+
+  geom_line(mapping = aes(x = Fecha, y = ClosedPrice), color = "blue4")+
+  geom_hline(yintercept = mean(dt_retorno_SPY$ClosedPrice), color = "darkred")
+
+```
+
+Los closed prices de la serie normal presentan una tendencia estacional creciente (no estacionario en media) y no en varianza. Mientras que la serie en retornos presenta estacionalidad en media.
+
+## Tests estadísticos  de Raíz unitaria y correlograma
+Primero se procederá a realizar un test de raíz unitaria de dickey fuller aumentado.
+*Para la acción*
+```{r}
+dfa.accion_SPY <- ur.df(dt_accion_SPY$ClosedPrice,lags = 10)
+  summary(dfa.accion_SPY)
+```
+En el caso de la acción se ve que el t calculado (2.3254 ) es menor al t crítico (-1.95). Por lo tanto, con 95% de confianza hay raíz unitaria y no es estacionario.
+*Para los retornos
+```{r}
+dfa.retorno_SPY <- ur.df(dt_retorno_SPY$ClosedPrice,lags = 10)
+  summary(dfa.retorno_SPY)
+```
+En el caso de los retornos se ve que el t calculado (-10.9501) es mayor al t crítico (-1.95). Por lo tanto, con 95% de confianza no hay raíz unitaria y es estacionario.
+
+Viendo el correlograma de los retornos
+```{r echo=FALSE}
+ggtsdisplay(dt_retorno_SPY$ClosedPrice,lag.max = 24)
+```
+
+Mediante el análisis gráfico la autocovariancia muestra significancia en el 4to rezago (sugiriendo un MA4) y la autocorrleación parcial muestra significancia en el 4to rezago (sugiriendo un AR4). El análisis gráfico sugiere un ARMA(4,4), por lo que mediante el comando *autoarima* se determinará el mejor modelo mediante el criterio AICC AIC BIC (el menor).
+```{r}
+modelo1 <- auto.arima(dt_retorno_SPY$ClosedPrice,
+                     max.p = 5,
+                     max.q = 5,
+                     stationary = TRUE,
+                     ic = c("aicc", "aic", "bic"),
+                     trace = TRUE)
+summary(modelo1)
+
+```
+El mejor modelo es un ARIMA(1,0,2) o ARMA(1,2) con los menores AIC, BIC y AICc.
+
+## Modelación de varianza
+El primer paso es comprobar que efectivamente los residuos del modelo calculado anteriormente siguen el comportamiento de un ruido blanco. Mediante *checkresiduals* podemos notar si se comporta así.
+```{r warning=FALSE}
+rescuad <- residuals(modelo1)^2
+checkresiduals(rescuad)
+```
+
+Se puede ver que algunos rezagos son significativos, no es un ruido blanco. Asimismo, la distribución no se asemeja a una normal.
+
+De la misma manera se realiza un test Ljung-Box para probar independencia de datos
+```{r}
+Box.test(rescuad, type="Ljung-Box")
+```
+Como el p valor es menor a 0.05 se rechaza la hipótesis nula con 95% de confianza y no hay suficiente evidencia estadística para probar que los datos se distribuyen independientemente.
+
+Para modelar la varianza se utilizará el EGARCH que permite modelar los choques asimétricos propios de una acción (los choques buenos no afectan de la misma forma que los malos), asimismo nos permite notar un efecto leverage dependiendo del signo del coeficiente gamma.
+```{r}
+model.spec <- ugarchspec(variance.model = list(model = "eGARCH",garchOrder= c(1,1)),
+                         mean.model = list(armaOrder = c(1,2),include.mean = TRUE),
+                         distribution.model = "norm")
+egarch11_SPY <- ugarchfit(spec = model.spec,
+                            data = dt_retorno_SPY$ClosedPrice,
+                            solver = "solnp")
+egarch11_SPY
+```
+En este caso se ve que el coeficiente Gamma1 (0.055819) es positivo y significativo, lo que indica que no hay efecto *Leverage* para el S&P 500.
+
+También se reportan los criterios Akaike, Bayes, Shibata y Hannan-Quinn
+```{r}
+dt_egarch11_SPY <- data.table(infocriteria(egarch11_SPY),keep.rownames = T)
+dt_egarch11_SPY
+```
+
+Tras el proceso, se puede apreciar que se estimó un ARMA(1,2) por parte de los retornos de la acción (transformación que eliminó la raíz unitaria de los precios de cierre). Asimismo, se modeló la varianza condicional a través de un EGARCH, el cual contiene un componente que describe el logaritmo de la varianza condicional. En este caso el proceso no mostró efecto *leverage* o apalancamiento (mayor volatilidad ante shocks negativos que ante shocks positivos).

@@ -1,0 +1,1 @@
+Coding of R for courses and personal projects applying data manipulation, econometrics, and machine learning insights.
